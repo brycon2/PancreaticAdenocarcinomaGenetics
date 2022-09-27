@@ -1,0 +1,221 @@
+---
+title: "Pancreatic Adenocarcinoma Genetics"
+author: "Bryce Chapman"
+output:
+  html_document:
+    df_print: paged
+bibliography: references.bib
+link-citations: yes
+csl: C://Users//bryco//Documents//Resources//BibStyles//ieee.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Pancreatic cancer is one of the deadliest form of cancers, even with it's relatively small incidence rate. Each year, roughly 53,000 patients in the United States will be diagnosed with pancreatic cancer with only a 6% 5 year survival rate. 95% of all pancreatic cancers are suspected to be pancreatic adenocarcinoma, or cancer of the exocrine portion of the pancreas @hruban2009molecular. The purpose of this project is to understand which genes are more highly expressed in pancreatic adenocarcinoma patients. compared to healthy patients.
+
+## Methods
+
+### Data Source and Obtainment
+
+We will be utilizing Liviu Badea's genomic dataset on whole tissue gene experession of pancreatic ductal adenocarcinoma @badea_whole-tissue_2009. The study design involved taking a pair of normal and tumor tissue samples from 36 pancreatic cancer patients during resection. For 3 of these patients, this process was doubled to ensure that there were no measurement errors, creating 39 control and tumor samples, each. Genetic expression was analyzed on Affymetrix U133 plus 2.0 whole genome microarrays. The microarray data was normalized using the robust multi-array average(RMA) algorithm. This data was then uploaded to NIH's Gene Expression Omnibus database in March of 2009.
+
+### Libraries
+
+These are the libraries we will be working with for this project. We will go into more detail for each of them they are used, but for now note that tibble, dplyr, ggplot2, and stringr come from the tidyverse package @Tidyverse, ggrepel is a ggplot2 extension, pheatmap makes statistics heatmaps @pheatmap, and GEOquery @GEOquery and limma @limma come from the bioconductor package.
+
+```{r libraries, message = FALSE}
+library(GEOquery) # accessing GEO database and files
+library(tibble) # making values into dataframes
+library(dplyr) # data manipulation
+library(ggplot2) # graphing
+library(ggrepel) # ggplot2 geometry label assistance
+library(stringr) # string augmentation in dataframes
+library(pheatmap) # correlation heatmap
+library(limma) # linear models for microarray
+```
+
+## Data Access
+
+Using GEOquery's getGEo function, we can access the dataset. The gene expression data series (GSE) code is gse15471. Prior to downloading, make sure to create a GEO folder so you don't have to constantly redownload the data.
+
+```{r data-download, message = FALSE}
+# download pancreatic genome data into GEO folder
+gse <- getGEO(GEO = "gse15471", destdir = "./GEO")
+gse <-gse[[1]]
+gse
+```
+
+From this, we can see there are 54675 genes from 78 tissue samples, which we know came from 36 total pancreatic cancer patients, which lines up with the description. Now, we can take a look at the patient data, the feature data, and the expression data. First, we will investigate the patient data.
+
+```{r pdata-view}
+# make patient data into tibble with geo id as row name, then view first 5
+gse_pdata_df <- as_tibble(pData(gse)) %>% 
+  column_to_rownames(var = "geo_accession")
+head(gse_pdata_df, n = 5)
+```
+
+There is a lot of data in this, but most of it is superfluous and has to do with where the contact is located. Of note are the row names, the gene name (title), the patient number (characteristics_ch1), and whether the tissue was normal or tumorous(characteristics_ch1.1).
+
+Doing the same for the first 5 features(genes) gives the following table:
+
+```{r fdata-view}
+gse_fdata_df <- as_tibble(fData(gse))
+head(gse_fdata_df, n = 5)
+```
+
+Lastly, we can look at the gene expression data. For this data, there is no accompanying standard error matrix for the expression data, however if that were the case we could access it with se.exprs.
+
+```{r exprs-view}
+gse_exprs_df <- as_tibble(exprs(gse), rownames = NA)
+head(gse_exprs_df)
+```
+
+One step we will need to do is ensure that the data is on the correct scale we'd expect from RMA data. One option is to manually scan through the summary output of exprs(gse). What we are going to use is a quick graph of boxplots with the expression data, which will allow for us to quickly scan through and see if anything looks out of place.
+
+```{r}
+ggplot(data = stack(gse_exprs_df), aes(x = ind, y = values)) + 
+  geom_boxplot() + 
+  ggtitle("Gene Expression by Sample") +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(size = rel(1.3)),
+        axis.text.x = element_blank() )
+```
+
+```{r}
+gse_pdata_df$characteristics_ch1.1 <- str_remove(gse_pdata_df$characteristics_ch1.1, pattern = "^sample: ")
+
+table(gse_pdata_df$characteristics_ch1.1)
+```
+
+## Data Analysis
+
+### Correlation Analysis
+
+The following heat map showcases how the gene expression varies when comparing between samples.
+
+```{r}
+correlation_matrix <- cor(gse_exprs_df, use = "c")
+
+annotation <- data.frame(row.names = rownames(gse_pdata_df), 
+                         Labels = gse_pdata_df$characteristics_ch1.1)
+
+pheatmap(correlation_matrix,annotation_row = annotation, 
+         cluster_rows = FALSE, cluster_cols = FALSE)
+```
+
+
+### Principal Component Analysis
+
+```{r pca, warning=FALSE}
+pca <- prcomp(t(gse_exprs_df))
+
+cbind(gse_pdata_df, pca$x) %>% 
+  ggplot(aes(x = PC1, y=PC2, col=`sample:ch1`)) + 
+  geom_point(size = 2) + 
+  ggtitle("Principal Component Analysis") +
+  labs(color = "Tissue") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(size = rel(1.3)),
+        axis.text = element_text(size = rel(1.2)))
+```
+
+### Differential Expression Analysis
+
+```{r}
+design <- model.matrix(~0 + gse_pdata_df$characteristics_ch1.1)
+colnames(design) <- c("Normal","Tumor")
+design
+```
+
+Keeping only genes expressed above the median levels in 3 or more samples to reduce possibility of false positives.
+
+```{r median-expression}
+expression_median <- median(exprs(gse))
+
+expressed <- gse_exprs_df > expression_median
+
+keep <- rowSums(expressed) >= 3
+
+table(keep)
+```
+
+Keeping only the genes labeled true
+
+```{r}
+gse_exprs_expressed_df <- gse_exprs_df[keep,]
+```
+
+```{r}
+gse_aw <- arrayWeights(gse_exprs_expressed_df,design)
+gse_aw
+```
+
+Creating a linear model with the array weights
+
+```{r}
+gse_exprs_expressed_lm <-  lmFit(gse_exprs_expressed_df, design, weights = gse_aw)
+
+head(gse_exprs_expressed_lm$coefficients)
+```
+
+Comparing between normal and tumor samples
+
+```{r}
+gse_contrasts <- makeContrasts(Normal - Tumor, levels = design)
+
+gse_contrasts_fit <-contrasts.fit(gse_exprs_expressed_lm,gse_contrasts)
+gse_ebayes <- eBayes(gse_contrasts_fit)
+```
+
+```{r}
+topTable(gse_ebayes)
+```
+
+```{r}
+summary(decideTests(gse_ebayes))
+```
+
+```{r}
+table(decideTests(gse_ebayes))
+```
+
+### Visualization of Selected Gene
+
+Adding gene information to the fitted model.
+
+```{r}
+gse_ebayes$genes <- gse_fdata_df %>% 
+  select(ID,GB_ACC)
+
+topTable(gse_ebayes)
+```
+
+Volcano plot
+
+```{r}
+results <- topTable(gse_ebayes, coef = 1, number = Inf) %>% 
+  mutate(Significant = P.Value < 0.05, abs(logFC) > 1)
+results%>% 
+ggplot(aes(x = logFC, y = B, col = Significant)) + 
+  geom_point()
+
+```
+
+### Investigating the Top Ranked Gene
+
+From our analysis, we know the top ranked gene is NM_000784.
+
+```{r}
+filter(results, GB_ACC == "NM_000784")
+```
+
+## References
+
+::: {#refs}
+:::

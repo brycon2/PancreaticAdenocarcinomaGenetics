@@ -7,6 +7,11 @@ output:
 bibliography: references.bib
 link-citations: yes
 csl: C://Users//bryco//Documents//Resources//BibStyles//ieee.csl
+
+knit: (function(input_file, encoding) {
+    out_dir <- 'docs';
+    rmarkdown::render(input_file, encoding=encoding,
+      output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 ---
 
 ```{r setup, include=FALSE}
@@ -15,7 +20,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Introduction
 
-Pancreatic cancer is one of the deadliest form of cancers, even with it's relatively small incidence rate. Each year, roughly 53,000 patients in the United States will be diagnosed with pancreatic cancer with only a 6% 5 year survival rate. 95% of all pancreatic cancers are suspected to be pancreatic adenocarcinoma, or cancer of the exocrine portion of the pancreas @hruban2009molecular. The purpose of this project is to understand which genes are more highly expressed in pancreatic adenocarcinoma patients. compared to healthy patients.
+Pancreatic cancer is one of the deadliest form of cancers, even with it's relatively small incidence rate. Each year, roughly 53,000 patients in the United States will be diagnosed with pancreatic cancer with only a 6% 5 year survival rate. This is primarily due to how the disease progresses. The disease does not typically show any symptoms until it becomes malignant @Rawla2019. When it reaches these later stages, it becomes extremely aggressive due to its easy access to nearby veins @Hruban2019. The disease is projected to get worse due to an increase in risk factor prevalence, especially diabetes @Muniraj2012-ur. While the death rate is so high, the diversity in types of pancreatic cancers is low, with 95% of all pancreatic cancers suspected to be pancreatic adenocarcinoma, or cancer of the exocrine portion of the pancreas @hruban2009molecular. The purpose of this project is to investigate gene expression in pancreatic adenocarcinoma tumors and see how most are regulated compared to healthy tissue.
+
+Personal note: I chose pancreatic adenocarcinoma as I lost my grandfather to this disease. This personal project is primarily a test in using R and relating it to the world of biotechnology. 
 
 ## Methods
 
@@ -86,6 +93,8 @@ ggplot(data = stack(gse_exprs_df), aes(x = ind, y = values)) +
         axis.text.x = element_blank() )
 ```
 
+Lastly, we are going to rename the sample types so they are a little cleaner to view.
+
 ```{r}
 gse_pdata_df$characteristics_ch1.1 <- str_remove(gse_pdata_df$characteristics_ch1.1, pattern = "^sample: ")
 
@@ -111,6 +120,8 @@ pheatmap(correlation_matrix,annotation_row = annotation,
 
 ### Principal Component Analysis
 
+To see if there is any grouping with the normal and tumor tissue samples, we will perform principal component anlaysis. 
+
 ```{r pca, warning=FALSE}
 pca <- prcomp(t(gse_exprs_df))
 
@@ -125,15 +136,20 @@ cbind(gse_pdata_df, pca$x) %>%
         axis.text = element_text(size = rel(1.2)))
 ```
 
-### Differential Expression Analysis
+While there is some mixing, we can tell there are two distinct groups, one for each tissue sample type.
 
+### Differential Gene Expression Analysis
+
+Differential gene expression analysis is a statistical test that is used for observing if a difference in expression level occurs for a gene when comparing between various groups. 
+
+To start, we will need to create a design matrix, which will just say which sample is a normal sample and which one is a tumor. 
 ```{r}
 design <- model.matrix(~0 + gse_pdata_df$characteristics_ch1.1)
 colnames(design) <- c("Normal","Tumor")
 design
 ```
 
-Keeping only genes expressed above the median levels in 3 or more samples to reduce possibility of false positives.
+Next, we are only keeping genes expressed above the median levels in 3 or more samples to reduce possibility of false positives.
 
 ```{r median-expression}
 expression_median <- median(exprs(gse))
@@ -145,26 +161,29 @@ keep <- rowSums(expressed) >= 3
 table(keep)
 ```
 
-Keeping only the genes labeled true
+Keeping only the genes labeled true, we are left with the following dataframe.
 
 ```{r}
 gse_exprs_expressed_df <- gse_exprs_df[keep,]
 ```
+
+With the design matrix and the updated gene matrix, we are going to create array weights to balance out quality differences between samples. These weights will be used for the linear model based on gene expression levels. 
 
 ```{r}
 gse_aw <- arrayWeights(gse_exprs_expressed_df,design)
 gse_aw
 ```
 
-Creating a linear model with the array weights
+Creating a linear model with the array weights for the genes
 
 ```{r}
 gse_exprs_expressed_lm <-  lmFit(gse_exprs_expressed_df, design, weights = gse_aw)
 
 head(gse_exprs_expressed_lm$coefficients)
+
 ```
 
-Comparing between normal and tumor samples
+Comparing between normal and tumor samples, we will use makeContrats and contrasts.fit from the limma package to find the coefficients and standard errors when comparing between normal and tumor samples. Then, we will use limma's empirical bayes statistical test to get the t-statistics for the differential expression levels.
 
 ```{r}
 gse_contrasts <- makeContrasts(Normal - Tumor, levels = design)
@@ -173,47 +192,45 @@ gse_contrasts_fit <-contrasts.fit(gse_exprs_expressed_lm,gse_contrasts)
 gse_ebayes <- eBayes(gse_contrasts_fit)
 ```
 
-```{r}
-topTable(gse_ebayes)
-```
+Below are the 10 genes with the highest differences in expression levels, sorted by smallest to highest p-value. 
 
 ```{r}
-summary(decideTests(gse_ebayes))
-```
-
-```{r}
-table(decideTests(gse_ebayes))
-```
-
-### Visualization of Selected Gene
-
-Adding gene information to the fitted model.
-
-```{r}
+# adding gene information to gse_ebayes test
 gse_ebayes$genes <- gse_fdata_df %>% 
   select(ID,GB_ACC)
 
 topTable(gse_ebayes)
 ```
+From this, we can also gather that the 10 most differently expressed genes are downregulated in tumors due to the negative logFC values.
 
-Volcano plot
+However, only looking at the 10 most differently expressed genes does not give the whole picture, so we'll look at the number of genes significantly downregulated, upregulated, and unchanging. 
+
+```{r}
+summary(decideTests(gse_ebayes))
+```
+With these results, we can see a large amount of genes are up and down regulated. The low amount of genes with no significant changes between groups can partially be explained by removing genes that don't express themselves in multiple samples. 
+
+
+As one last way of showcasing the results, below is a volcano plot that showcases the differential expression analysis. 
 
 ```{r}
 results <- topTable(gse_ebayes, coef = 1, number = Inf) %>% 
-  mutate(Significant = P.Value < 0.05, abs(logFC) > 1)
+  mutate(Significant = P.Value < 0.01, abs(logFC) > 1)
 results%>% 
 ggplot(aes(x = logFC, y = B, col = Significant)) + 
-  geom_point()
+  geom_point() + 
+  ggtitle("Volcano Plot of Gene Expression") +
+  labs(color = "Significantly Different?") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(size = rel(1.3)),
+        axis.text = element_text(size = rel(1.2)))
 
 ```
 
-### Investigating the Top Ranked Gene
+## Results and Conclusion
 
-From our analysis, we know the top ranked gene is NM_000784.
-
-```{r}
-filter(results, GB_ACC == "NM_000784")
-```
+The larger amount of downregulated genes fits with what previous research has found. In 2013, Danielsson et. al found that genes were more likely to be down regulated than upregulated during malignant transformation @S_Punla2022-lk. As most pancreatic cancers are discovered in the malignant stage due to symptoms not typically arising until then, this makes sense that our dataset would primarily feature down regulated genes. Further research is necessary to determine appropriate targets for therapies. 
 
 ## References
 

@@ -1,2 +1,2 @@
 # PancreaticAdenocarcinomaGenetics
-A look at pancreatic adenocarcinoma gene expression in R
+A look at pancreatic adenocarcinoma gene expression regulation in R. 
